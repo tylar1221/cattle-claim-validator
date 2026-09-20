@@ -1,7 +1,40 @@
-cattle_fastapi/uploads/
-cattle_fastapi/organized_exports/
-cattle_fastapi/cattle_claims.db
-cattle_fastapi/__pycache__/
-cattle_fastapi/**/__pycache__/
+# ===== SECRETS — NEVER commit these =====
+credentials.json
+token_combined.pickle
+service_account.json
+*.pickle
+*.pkl
+
+# ===== Local databases (contain real user data) =====
+*.db
+*.db-wal
+*.db-shm
+
+# ===== Python bytecode =====
+__pycache__/
 *.pyc
-cloudflared.exe
+*.pyo
+*.pyd
+
+# ===== Virtual environments =====
+venv/
+env/
+.venv/
+ENV/
+
+# ===== IDE / editor =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Logs =====
+*.log
+
+# ===== Local exports (if any accidentally left) =====
+organized_exports/
+uploads/

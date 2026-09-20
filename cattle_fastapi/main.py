@@ -22,12 +22,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
-    os.makedirs("uploads", exist_ok=True)
     init_db()
-    # NEW -- load PaddleOCR eagerly here, not on the first ear_tag upload.
-    # Model init is expensive (loads several ONNX models, downloads them
-    # on first-ever run) -- doing that lazily would make the first real
-    # claimant's ear tag photo the one that eats the multi-second delay.
     get_ocr_engine()
 
 
@@ -35,10 +30,9 @@ app.include_router(captures.router)
 app.include_router(cases.router)
 app.include_router(ocr_test.router)  # NEW -- standalone OCR testing, not part of the claim flow
 
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# REMOVED -- /uploads static mount. Files live on Drive now; uploads/ is a
+# short-lived temp staging dir only, never served to the browser.
 app.mount("/static", StaticFiles(directory="static", html=True), name="static")
-
-
 @app.get("/")
 async def root():
     return RedirectResponse(url="/static/index.html")

@@ -14,22 +14,13 @@ DB_PATH = Path("cattle_claims.db")
 
 
 def get_conn():
-    # ⚠️ FIX, found via real testing: plain sqlite3.connect() defaults to
-    # DELETE journal mode, which locks the ENTIRE database file for the
-    # duration of a write -- fine for one request at a time, but this app
-    # now legitimately has concurrent writers: the main upload request's
-    # INSERT, the background OCR task's UPDATE (services/eartag_ocr_
-    # service.py's run_ocr_and_store), and organize_case's own reads, all
-    # potentially overlapping when several captures land close together
-    # (e.g. a stuck offline queue flushing a burst of retries at once).
-    # Hit exactly this: "sqlite3.OperationalError: database is locked"
-    # crashed the server mid-upload. Two changes fix it:
-    #   - WAL journal mode lets readers and a writer proceed concurrently
-    #     instead of exclusively locking the whole file per write.
-    #   - busy_timeout tells SQLite to wait (here, 5s) and retry
-    #     internally if it does hit a lock, instead of raising
-    #     OperationalError immediately -- turns a rare remaining race into
-    #     a brief wait instead of a crash.
+  # =========================================================================
+# SQLite storage -- capture metadata only. Photo/video bytes go straight
+# to Google Drive at upload time (see api/captures.py + services/
+# google_drive_service.py) -- nothing is ever written to local disk. This
+# table just indexes what's on Drive (drive_file_id/drive_file_link) plus
+# the timestamp/GPS/trust fields the Matrix sheet cares about.
+# =========================================================================
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -166,11 +157,13 @@ def init_db():
         ("normalize_scale_applied", "REAL"),
         ("normalize_skipped", "INTEGER"),
         ("normalize_skip_reason", "TEXT"),
-        # NEW -- server-side ear tag OCR (services/eartag_ocr_service.py).
-        # JSON blob, same "signals object" pattern as exif_signals above:
-        # combined_text, lines, confidence, line_format_match, needs_review,
-        # error. NULL for every non-ear_tag step, where this doesn't apply.
         ("ocr_signals", "TEXT"),
+        # NEW -- Google Drive storage. The actual image/video bytes now live
+        # on Drive, not on local disk. `filename` still exists and is still
+        # used for the *temporary* local file during processing -- these two
+        # columns are what the record of "where is this permanently" points at.
+        ("drive_file_id",   "TEXT"),
+        ("drive_file_link", "TEXT"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -196,7 +189,18 @@ def init_db():
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise
-
+    # NEW -- case-level Drive folder reference, so api/cases.py can return a
+# shareable link without having to re-query Drive every time.
+    case_new_columns = [
+        ("drive_folder_id",   "TEXT"),
+        ("drive_folder_link", "TEXT"),
+    ]
+    for col_name, col_type in case_new_columns:
+        try:
+            conn.execute(f"ALTER TABLE cases ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
     # ⚠️ REMOVAL, per explicit request: Marker Scale (ArUco) is being
     # dropped from the system completely, not just hidden -- including
     # columns already added to an existing database by a previous run of

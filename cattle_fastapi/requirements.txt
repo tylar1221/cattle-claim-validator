@@ -6,3 +6,6 @@ Pillow==10.4.0
 opencv-python-headless==4.10.0.84
 paddleocr==3.7.0
 paddlepaddle==3.0.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.149.0

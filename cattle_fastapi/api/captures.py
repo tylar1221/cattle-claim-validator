@@ -7,8 +7,11 @@ import hashlib
 import json
 import os
 import uuid
+import threading          # <-- ADD THIS
+
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from services.google_drive_service import GoogleDriveService, _safe_name
 
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
 
@@ -19,7 +22,7 @@ from services.organize import compute_capture_flags, organize_case  # NEW -- sha
 
 router = APIRouter(prefix="/api/captures", tags=["captures"])
 
-UPLOAD_DIR = "uploads"
+
 
 # Rule Engine sheet has TWO SEPARATE checks that both use the same raw
 # "server_received_at minus device_timestamp" number, but mean very
@@ -32,7 +35,98 @@ CAPTURE_UPLOAD_GAP_THRESHOLD_MS = 72 * 60 * 60 * 1000  # "Capture-to-upload gap"
 ANCHOR_NTP_DRIFT_THRESHOLD_MS = 120_000   # "Device clock vs GNSS/NTP UTC drift" -- Rule Engine's OTHER 120s check,
                                            # measured at the moment the time-anchor was established, not since
 
+# Module-level singleton -- the DriveService is expensive to build (reads
+# the credential file, resolves the root folder ID on first use) and is
+# thread-safe by design (thread-local service instances inside), so one
+# shared instance is correct and cheapest.
+_drive_service = None
+_drive_lock = threading.Lock()
 
+def _get_drive():
+    global _drive_service
+    if _drive_service is None:
+        with _drive_lock:
+            if _drive_service is None:
+                _drive_service = GoogleDriveService()
+    return _drive_service
+
+
+def _upload_capture_to_drive(capture_id: int, contents: bytes, case_id: str,
+                             step_id: str, drive_filename: str,
+                             mime_type: str):
+    """
+    Background task: push one capture's bytes up to Drive and record the
+    resulting file ID on the capture row.
+
+    Runs AFTER the upload response has already been sent (see how it's
+    scheduled below), so a slow Drive call never delays the person's
+    upload. Nothing ever touches local disk -- `contents` is held in
+    memory (this function is a BackgroundTask closure, so the bytes stay
+    alive until this runs) and goes straight to Drive. If Drive is down,
+    this capture's bytes are genuinely gone once this task finishes --
+    see the honesty note on that tradeoff where this is scheduled below.
+    """
+    drive = _get_drive()
+    if not drive.is_available():
+        print(f"[captures] Drive not available -- capture {capture_id} stays local-only")
+        return
+
+    try:
+        # Find/create the case folder. Domain lets us pick Live/ vs Dead/.
+        domain = "live" if step_id.startswith("live_") else "dead"
+        case_folder = drive.get_or_create_case_folder(case_id, domain=domain)
+        if not case_folder:
+            print(f"[captures] Could not get/create Drive folder for case {case_id}")
+            return
+
+        # Record the case folder link on the cases row (idempotent -- set
+        # every time, cheap, and self-heals if the folder got recreated).
+        conn = get_conn()
+        conn.execute(
+            "UPDATE cases SET drive_folder_id = ?, drive_folder_link = ? WHERE id = ?",
+            (case_folder["folder_id"], case_folder["drive_link"], case_id),
+        )
+        conn.commit()
+        conn.close()
+
+        # Which subfolder does this specific step go in?
+        target_folder_id = drive.folder_for_capture(case_folder, step_id)
+        if not target_folder_id:
+            print(f"[captures] No target folder resolved for step {step_id}")
+            return
+
+        # Push the bytes. Resumable upload via MediaFileUpload handles a
+        # flaky connection better than a single-shot upload would.
+        result = drive.upload_bytes(
+            target_folder_id, contents, drive_filename, mime_type=mime_type
+        )
+        if not result:
+            print(f"[captures] Drive upload failed for capture {capture_id}")
+            return
+
+        # Record the Drive location on the capture row. This is what the
+        # frontend / organizers / future external systems read to find
+        # the actual file.
+        conn = get_conn()
+        conn.execute(
+            "UPDATE captures SET drive_file_id = ?, drive_file_link = ? WHERE id = ?",
+            (result["file_id"], result["file_link"], capture_id),
+        )
+        conn.commit()
+        conn.close()
+        print(f"[captures] Drive upload OK: capture {capture_id} -> {result['file_link']}")
+
+    except Exception as e:
+        # ⚠️ Broad catch on purpose. This task is scheduled before
+        # organize_case -- if it raised here, organize_case would never
+        # run for this capture (BackgroundTasks chains abort on uncaught
+        # exceptions, same failure mode as the OCR task's history).
+        # A Drive failure must degrade gracefully, not silently break
+        # the whole export pipeline.
+        print(f"[captures] Drive upload crashed for capture {capture_id}: {e}")
+
+
+        
 @router.post("/upload")
 async def upload_capture(
     background_tasks: BackgroundTasks,
@@ -70,12 +164,8 @@ async def upload_capture(
     server_received_at = datetime.now(timezone.utc)
 
     ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-    stored_name = f"{uuid.uuid4().hex}{ext}"
-    dest_path = os.path.join(UPLOAD_DIR, stored_name)
-
+    stored_name = f"{uuid.uuid4().hex}{ext}"   # kept only as a stable identifier for this capture's Drive filename below -- no longer a disk path
     contents = await file.read()
-    with open(dest_path, "wb") as f:
-        f.write(contents)
 
     # Frame integrity hash -- Matrix scenario #5 Live's "close the gap"
     # fix. Recomputed HERE from the bytes actually received, independent
@@ -224,29 +314,37 @@ async def upload_capture(
     capture_id = cur.lastrowid
     conn.close()
 
-    # NEW -- ear tag OCR, scheduled as a background task, ADDED BEFORE
-    # organize_case below. FastAPI runs BackgroundTasks sequentially in
-    # the order they were added (not concurrently), so this guarantees
-    # the OCR result is already written to this capture's row by the time
-    # organize_case reads the DB and regenerates case_summary -- otherwise
-    # organize_case could run first and produce a summary missing the OCR
-    # line entirely, on every single upload, not just an occasional race.
+    # ---------------------------------------------------------------
+    # BACKGROUND TASK ORDER MATTERS -- FastAPI runs BackgroundTasks
+    # sequentially, in the order they're added, so this ordering is
+    # deliberate:
+    #   1. Drive upload  -- records drive_file_id on the row FIRST, so
+    #                       that organize_case (which reads the row) can
+    #                       see the Drive link when it builds the summary
+    #   2. OCR           -- records ocr_signals on the row, so
+    #                       organize_case sees it
+    #   3. organize_case -- rebuilds the case summary from a DB where
+    #                       both of the above are already present
+    # Getting this order wrong produces summaries missing the Drive
+    # link or the OCR line on EVERY upload, not just occasionally.
+    # ---------------------------------------------------------------
+    drive_filename = f"{_safe_name(step_id)}_{capture_id}{ext}"
+    mime = file.content_type or ("video/webm" if ext == ".webm" else "image/jpeg")
+    background_tasks.add_task(
+        _upload_capture_to_drive,
+        capture_id, contents, case_id, step_id, drive_filename, mime,
+    )
+
     if is_ear_tag_step:
         background_tasks.add_task(run_ocr_and_store, capture_id, contents)
 
-    # NEW -- automatically keeps organized_exports/<case>/ current with
-    # every upload, no manual script run needed. Runs as a BACKGROUND task,
-    # scheduled to fire only AFTER the response below has already been sent
-    # to the browser -- copying files and writing the summary takes a
-    # little I/O time, and none of that should add latency to the actual
-    # upload the person is waiting on.
     background_tasks.add_task(organize_case, case_id)
-
     return {
         "id": capture_id,
         "filename": stored_name,
         "server_received_at": server_received_at.isoformat(),
         "drift_server_vs_device_ms": drift_ms,
+        "drive_upload_pending": True,   # NEW -- the actual Drive link lands a moment later, see drive_file_link on GET /{case_id}
         # THREE separate signals now, not one conflated "drift_flag":
         #
         # 1. clock_tamper_flag -- the RELIABLE signal. Comes from the
