@@ -1,15 +1,46 @@
+import os
 import sqlite3
+import sys
 
-conn = sqlite3.connect('cattle_claims.db')
+# Always use the database sitting next to this script, wherever you run it from
+DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cattle_claims.db")
+conn = sqlite3.connect(DB)
+conn.row_factory = sqlite3.Row
 
-print("\n=== CASES ===")
-cols = [c[0] for c in conn.execute('SELECT * FROM cases').description]
-for row in conn.execute('SELECT * FROM cases'):
-    print(dict(zip(cols, row)))
+# Optional: python show_latest.py 5   -> only the 5 newest cases
+limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
 
-print("\n=== CAPTURES ===")
-cols = [c[0] for c in conn.execute('SELECT * FROM captures').description]
-for row in conn.execute('SELECT * FROM captures'):
-    print(dict(zip(cols, row)))
+sql = "SELECT * FROM cases ORDER BY created_at DESC, rowid DESC"
+if limit:
+    sql += f" LIMIT {limit}"
+cases = conn.execute(sql).fetchall()
+
+if not cases:
+    print("No cases found.")
+    raise SystemExit
+
+print(f"Database: {DB}")
+print(f"Total cases shown: {len(cases)}\n")
+
+for case in cases:
+    print("=" * 70)
+    print(f"CASE {case['id']}")
+    print("=" * 70)
+    for k in case.keys():
+        if case[k] not in (None, ""):
+            print(f"  {k}: {case[k]}")
+
+    caps = conn.execute(
+        "SELECT * FROM captures WHERE case_id = ? ORDER BY id DESC", (case["id"],)
+    ).fetchall()
+    print(f"\n  --- CAPTURES ({len(caps)}) ---")
+    if not caps:
+        print("    (none - no photo reached the server for this case)")
+    for c in caps:
+        print(f"\n    capture {c['id']}: {c['step_id']}")
+        for k in c.keys():
+            if c[k] not in (None, ""):
+                print(f"      {k}: {c[k]}")
+    print()
 
 conn.close()
