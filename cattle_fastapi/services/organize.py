@@ -11,6 +11,7 @@
 # =========================================================================
 import json
 import re
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -20,17 +21,41 @@ CLOCK_DRIFT_THRESHOLD_MS = 120_000
 CAPTURE_UPLOAD_GAP_THRESHOLD_MS = 72 * 60 * 60 * 1000
 ANCHOR_NTP_DRIFT_THRESHOLD_MS = 120_000
 
+# ⚠️ NEW -- one lock per case_id. organize_case() is scheduled as a
+# BackgroundTask after EVERY capture upload, so several captures landing
+# close together (common on a fast connection) fire off several
+# organize_case() calls concurrently for the SAME case. GoogleDriveService
+# .upload_text() avoids duplicate files by searching Drive for an existing
+# file by name before creating one -- but that search has a real
+# propagation-delay race: two concurrent calls can both run their search
+# before either one's create() becomes visible, so both conclude "nothing
+# there yet" and both create a file. This is what produced duplicate
+# Case Summary.txt / .json files. Serializing all Drive-summary writes for
+# a given case_id through one lock closes that race.
+_case_locks: dict[str, threading.Lock] = {}
+_case_locks_guard = threading.Lock()
+
+
+def _lock_for_case(case_id: str) -> threading.Lock:
+    with _case_locks_guard:
+        if case_id not in _case_locks:
+            _case_locks[case_id] = threading.Lock()
+        return _case_locks[case_id]
+
 
 def _format_ist(timestamp_str):
     if not timestamp_str:
         return timestamp_str
     try:
-        normalized = timestamp_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(normalized)
-        ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
-        return ist.strftime("%Y-%m-%d %I:%M:%S %p IST")
+        if isinstance(timestamp_str, datetime):
+            dt = timestamp_str
+        else:
+            dt = datetime.fromisoformat(str(timestamp_str).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %I:%M:%S %p IST")
     except (ValueError, TypeError):
-        return timestamp_str
+        return str(timestamp_str)
 
 
 def compute_capture_flags(row: dict, conn) -> dict:
@@ -50,7 +75,6 @@ def compute_capture_flags(row: dict, conn) -> dict:
         duplicate_of = dict(duplicate_row) if duplicate_row else None
 
     exif_signals = json.loads(row["exif_signals"]) if row.get("exif_signals") else None
-    ocr_signals = json.loads(row["ocr_signals"]) if row.get("ocr_signals") else None
     frame_hash_match = row.get("frame_hash_match")
     timezone_mismatch_flag = row.get("timezone_mismatch_flag")
 
@@ -71,7 +95,6 @@ def compute_capture_flags(row: dict, conn) -> dict:
             drift_ms is not None and abs(drift_ms) > CAPTURE_UPLOAD_GAP_THRESHOLD_MS
         ),
         "exif_signals": exif_signals,
-        "ocr_signals": ocr_signals,
         "server_frame_hash": server_frame_hash,
         "frame_hash_match": None if frame_hash_match is None else bool(frame_hash_match),
         "timezone_mismatch_flag": None if timezone_mismatch_flag is None else bool(timezone_mismatch_flag),
@@ -144,23 +167,29 @@ def organize_case(case_id, conn=None):
         # failure never raises out of this function -- callers (upload
         # endpoint, case-detail save) schedule this as a fire-and-forget
         # background task and shouldn't crash over it.
+        #
+        # ⚠️ NEW -- the actual folder-resolve + upload_text calls are now
+        # serialized per case_id via _lock_for_case(). See that helper's
+        # comment above for exactly which race this closes.
         # -----------------------------------------------------------------
         try:
-            from services.google_drive_service import GoogleDriveService
-            drive = GoogleDriveService()
-            if drive.is_available():
-                case_folder = drive.get_or_create_case_folder(
-                    case_id, domain=case_row.get("domain", "live")
-                )
-                if case_folder:
-                    drive.upload_text(case_folder["folder_id"], "Case Summary.txt", txt_content)
-                    drive.upload_text(case_folder["folder_id"], "Case Summary.json", json_content)
+            from services.google_drive_service import get_drive_service
+            drive = get_drive_service()
 
-                    conn.execute(
-                        "UPDATE cases SET drive_folder_id = ?, drive_folder_link = ? WHERE id = ?",
-                        (case_folder["folder_id"], case_folder["drive_link"], case_id),
+            if drive.is_available():
+                with _lock_for_case(case_id):
+                    case_folder = drive.get_or_create_case_folder(
+                        case_id, domain=case_row.get("domain", "live")
                     )
-                    conn.commit()
+                    if case_folder:
+                        drive.upload_text(case_folder["folder_id"], "Case Summary.txt", txt_content)
+                        drive.upload_text(case_folder["folder_id"], "Case Summary.json", json_content)
+
+                        conn.execute(
+                            "UPDATE cases SET drive_folder_id = ?, drive_folder_link = ? WHERE id = ?",
+                            (case_folder["folder_id"], case_folder["drive_link"], case_id),
+                        )
+                        conn.commit()
             else:
                 print(f"[organize] Drive unavailable -- summary for case {case_id} not pushed this round")
         except Exception as e:
@@ -229,17 +258,7 @@ def _build_readable_summary(case_row, captures):
                 lines.append(f"  Pixel Norm.:     Skipped ({cap.get('normalize_skip_reason')})")
             else:
                 lines.append(f"  Pixel Norm.:     {cap.get('normalize_scale_applied')}x applied (infra only, no consumer yet)")
-        if flags.get("ocr_signals"):
-            ocr = flags["ocr_signals"]
-            if ocr.get("error"):
-                lines.append(f"  Ear Tag OCR:     FAILED -- {ocr['error']}")
-            else:
-                conf_pct = round((ocr.get("confidence") or 0) * 100)
-                lines.append(f"  Ear Tag OCR:     {ocr.get('combined_text') or '(no digits read)'}  ({conf_pct}% confidence{', NEEDS REVIEW' if ocr.get('needs_review') else ''})")
-                if ocr.get("letter_lines"):
-                    review_note = ', uncertain' if ocr.get('letters_need_review') else ''
-                    lines.append(f"  Ear Tag Letters: {', '.join(ocr['letter_lines'])}{review_note}")
-
+        
         warnings = []
         if flags["clock_tamper_flag"]:
             warnings.append("CLOCK CHANGED MID-SESSION")
@@ -258,9 +277,7 @@ def _build_readable_summary(case_row, captures):
             high = [f for f in flags["exif_signals"]["flags"] if f["weight"] == "High"]
             if high:
                 warnings.append(f"{len(high)} HIGH-WEIGHT EXIF FLAG(S)")
-        if flags.get("ocr_signals") and flags["ocr_signals"].get("needs_review"):
-            warnings.append("EAR TAG OCR NEEDS REVIEW (low confidence or unexpected format)")
-
+        
         lines.append(f"  Warnings:        {', '.join(warnings) if warnings else 'None'}")
         lines.append("")
 

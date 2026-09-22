@@ -29,6 +29,16 @@
 # "[Errno 32] Broken pipe" errors under concurrent uploads. Fixed with a
 # thread-local service, exactly as in the reference service.
 #
+# ⚠️ FIX -- DUPLICATE FOLDERS (found via real testing): get_or_create_case_folder
+# is called from _upload_capture_to_drive (a background task scheduled after
+# EVERY capture upload). When several captures land close together, multiple
+# background tasks call this concurrently for the SAME case. Google Drive's
+# _find_child_folder -> _create_folder sequence is NOT atomic -- two threads
+# can both search, both see "not there yet", and both create the folder. This
+# is exactly the race organize.py already solved for its OWN Drive-summary
+# writes via _lock_for_case. Fixed here the SAME way: one lock per case_id,
+# held for the entire resolve-or-create operation.
+#
 # Auth: auto-detects whichever credential file exists:
 #   1. service_account.json  -- preferred for servers / AWS
 #   2. token_combined.pickle -- the existing OAuth token (dev machines only)
@@ -81,6 +91,32 @@ def _safe_name(s) -> str:
         return "unknown"
     cleaned = re.sub(r"[^\w\-\. ]", "_", str(s))[:80].strip()
     return cleaned or "unknown"
+
+
+# =========================================================================
+# FIX (duplicate folders): one lock per case_id, held for the ENTIRE
+# resolve-or-create operation. Without this, concurrent background upload
+# tasks each independently call _find_child_folder -> (not found) ->
+# _create_folder, and both end up creating the same folder. This is the
+# same per-case-lock pattern organize.py already uses for its summary
+# uploads (_lock_for_case) -- the class-level folder-ID cache alone is
+# NOT sufficient, since the race happens BEFORE anything is cached.
+#
+# Locked at MODULE level (not per-instance) because GoogleDriveService is
+# designed to be instantiated freely at call sites (see the docstring on
+# the class) -- a per-instance lock would allow two instances to race
+# against each other. Module-level ensures a single global lock table.
+# =========================================================================
+_case_creation_locks: Dict[str, threading.Lock] = {}
+_case_creation_locks_guard = threading.Lock()
+
+
+def _lock_for_case_folder(case_id: str) -> threading.Lock:
+    """Returns a (lazily created) per-case lock for folder-resolution."""
+    with _case_creation_locks_guard:
+        if case_id not in _case_creation_locks:
+            _case_creation_locks[case_id] = threading.Lock()
+        return _case_creation_locks[case_id]
 
 
 class GoogleDriveService:
@@ -213,6 +249,10 @@ class GoogleDriveService:
         the rest of the service should use -- guarantees we never end up
         with two "Ear Tag" folders under the same case, which was a real
         failure mode in an earlier design that just called create every time.
+
+        ⚠️ NOTE: this method itself is NOT thread-safe against concurrent
+        callers with the SAME (parent_id, name). Callers MUST hold the
+        per-case lock (_lock_for_case_folder) -- see get_or_create_case_folder.
         """
         existing = self._find_child_folder(parent_id, name)
         if existing:
@@ -245,85 +285,126 @@ class GoogleDriveService:
         missing subfolders) on first call. Idempotent -- safe to call on
         every capture upload.
 
-        Returns:
-            {
-              "folder_id": "...",           # the CASE-xxx folder
-              "drive_link": "https://...",  # shareable link to that folder
-              "folder_name": "CASE-case_ab12cd34ef56",
-              "subfolders": { "live": "...", "flank": "...", ... }  # convenience map
-            }
-            or None if Drive is unavailable.
+        ⚠️ FIX (duplicate folders): the entire resolve-or-create operation
+        is serialized per-case via _lock_for_case_folder. Without this,
+        concurrent background upload tasks each independently search-then-
+        create, and both succeed in creating the SAME folder (Drive's
+        create() is not a "create-if-not-exists" -- it always creates).
+        Locking here means the second-and-later callers wait, then find
+        the folder the first caller just created -- exactly like the
+        per-case lock organize.py already uses for its Drive summaries.
+
+        Also writes drive_folder_id / drive_folder_link to the `cases`
+        table IMMEDIATELY on first resolution, rather than waiting for a
+        downstream caller to remember to do it.
         """
-        root_id = self.get_or_create_root_folder()
-        if not root_id:
-            return None
+        # ---------------- CRITICAL SECTION START ----------------
+        # Hold the per-case lock for the ENTIRE folder resolution. The
+        # folder-ID cache check is inside the lock too -- otherwise a
+        # second thread could pass the cache check, then block, then run
+        # the full search-and-create anyway, defeating the purpose.
+        with _lock_for_case_folder(case_id):
 
-        # One folder per case. Name-prefixed with CASE- so it sorts and
-        # reads clearly in Drive's UI, and includes the raw case_id so
-        # find-by-name is exact-match, not fuzzy.
-        case_folder_name = f"CASE-{case_id}"
-
-        with self._cache_lock:
-            case_folder_id = self._folder_id_cache.get((case_id, ""), None)
-        if not case_folder_id:
-            case_folder_id = self._get_or_create_folder(root_id, case_folder_name)
-            if not case_folder_id:
+            root_id = self.get_or_create_root_folder()
+            if not root_id:
                 return None
+
+            case_folder_name = f"CASE-{case_id}"
+
+            # Fast path: already resolved this case's folder in a previous
+            # call -- read it from cache (under cache lock) and skip Drive.
             with self._cache_lock:
-                self._folder_id_cache[(case_id, "")] = case_folder_id
+                case_folder_id = self._folder_id_cache.get((case_id, ""), None)
 
-        # Fixed subfolder set -- created up front so the folder always
-        # looks complete even before the first upload of that type. Keeping
-        # this list small and explicit beats a generic "create as needed"
-        # scheme here, because it's what a reviewer sees first when they
-        # open a case.
-        SUBFOLDER_NAMES = [
-            ("live_root",    "Live"),
-            ("dead_root",    "Dead"),
-            ("flank",        "Flank"),
-            ("front_head",   "Front Head"),
-            ("rear_view",    "Rear View"),
-            ("muzzle",       "Muzzle"),
-            ("ear_tag",      "Ear Tag"),
-            ("owner_photo",  "Owner Photo"),
-            ("video",        "Video"),
-            ("scar_injury",  "Scar Injury"),
-            ("geotag",       "Geotag"),
-            ("forensics",    "Forensics"),
-        ]
+            if not case_folder_id:
+                case_folder_id = self._get_or_create_folder(root_id, case_folder_name)
+                if not case_folder_id:
+                    return None
+                with self._cache_lock:
+                    self._folder_id_cache[(case_id, "")] = case_folder_id
 
-        # Which root the step subfolders live under depends on domain.
-        domain_root_name = "Live" if domain == "live" else "Dead"
-        domain_root_id = self._get_or_create_folder(case_folder_id, domain_root_name)
+            SUBFOLDER_NAMES = [
+                ("flank",        "Flank"),
+                ("front_head",   "Front Head"),
+                ("rear_view",    "Rear View"),
+                ("muzzle",       "Muzzle"),
+                ("ear_tag",      "Ear Tag"),
+                ("owner_photo",  "Owner Photo"),
+                ("video",        "Video"),
+                ("scar_injury",  "Scar Injury"),
+                ("geotag",       "Geotag"),
+            ]
 
-        subfolders = {domain: domain_root_id}
-        for key, name in SUBFOLDER_NAMES:
-            # Skip the two domain roots -- already made above
-            if key in ("live_root", "dead_root"):
-                continue
-            # Everything else is nested under the domain root
-            folder_id = self._get_or_create_folder(domain_root_id, name)
-            subfolders[key] = folder_id
+            domain_root_name = "Live" if domain == "live" else "Dead"
 
-        # Forensics lives directly under the case folder (it spans both
-        # live and dead evidence for that case), not under Live/ or Dead/.
-        forensics_id = self._get_or_create_folder(case_folder_id, "Forensics")
-        subfolders["forensics"] = forensics_id
+            # Cache key for the domain root, so repeat calls skip the
+            # find-or-create for "Live"/"Dead" too.
+            with self._cache_lock:
+                domain_root_id = self._folder_id_cache.get((case_id, domain_root_name), None)
 
-        return {
-            "folder_id": case_folder_id,
-            "drive_link": f"https://drive.google.com/drive/folders/{case_folder_id}",
-            "folder_name": case_folder_name,
-            "subfolders": subfolders,
-        }
+            if not domain_root_id:
+                domain_root_id = self._get_or_create_folder(case_folder_id, domain_root_name)
+                if domain_root_id:
+                    with self._cache_lock:
+                        self._folder_id_cache[(case_id, domain_root_name)] = domain_root_id
+
+            subfolders = {domain: domain_root_id}
+
+            # FIX: Only create the subfolders under the DOMAIN root (Live/ or
+            # Dead/), once each. Previously the loop skipped live_root/dead_root
+            # keys but then unconditionally added "Forensics" INSIDE the domain
+            # root -- which is why you also saw a duplicate "Forensics" folder
+            # sitting inside Live/ in the screenshot. Forensics belongs at the
+            # CASE root only (alongside Live/, Dead/, Case Summary.*), not
+            # inside each domain subfolder.
+            for key, name in SUBFOLDER_NAMES:
+                cache_key = (case_id, f"{domain_root_name}/{name}")
+                with self._cache_lock:
+                    existing_id = self._folder_id_cache.get(cache_key, None)
+                if not existing_id:
+                    existing_id = self._get_or_create_folder(domain_root_id, name)
+                    if existing_id:
+                        with self._cache_lock:
+                            self._folder_id_cache[cache_key] = existing_id
+                subfolders[key] = existing_id
+
+            # Forensics at the CASE root -- ONCE, not per-domain, and NOT
+            # duplicated inside the domain root (that was the extra bug).
+            with self._cache_lock:
+                forensics_id = self._folder_id_cache.get((case_id, "__forensics__"), None)
+            if not forensics_id:
+                forensics_id = self._get_or_create_folder(case_folder_id, "Forensics")
+                if forensics_id:
+                    with self._cache_lock:
+                        self._folder_id_cache[(case_id, "__forensics__")] = forensics_id
+            subfolders["forensics"] = forensics_id
+
+            drive_link = f"https://drive.google.com/drive/folders/{case_folder_id}"
+
+            # Record the folder reference in the DB. Idempotent UPDATE,
+            # wrapped so a DB hiccup can never break folder creation.
+            try:
+                conn = get_conn()
+                conn.execute(
+                    "UPDATE cases SET drive_folder_id = ?, drive_folder_link = ? WHERE id = ?",
+                    (case_folder_id, drive_link, case_id),
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"[Drive] Could not persist folder link for case {case_id} (non-fatal): {e}")
+
+            return {
+                "folder_id": case_folder_id,
+                "drive_link": drive_link,
+                "folder_name": case_folder_name,
+                "subfolders": subfolders,
+            }
+        # ---------------- CRITICAL SECTION END ----------------
 
     # ------------------------------------------------------------------
     # MAPPING capture step_id -> which subfolder it belongs in
     # ------------------------------------------------------------------
-    # The frontend sends step_ids like "live_ear_tag_live" and "dead_ear_tag"
-    # (see captures.py's is_ear_tag_step comment). This maps them to the
-    # subfolder key used above. Anything unmapped falls into a generic
-    # "_unsorted" folder so it's visible, not silently dropped.
     STEP_TO_SUBFOLDER = {
         "flank":              "flank",
         "flank_live":         "flank",
@@ -351,15 +432,25 @@ class GoogleDriveService:
         """
         Given the case folder dict from get_or_create_case_folder and a
         capture's step_id, returns the specific subfolder ID the file
-        should land in. Falls back to the domain root if the step isn't
-        recognized, rather than failing -- an unknown new step should
-        still save the file somewhere findable.
+        should land in.
         """
-        sub = self.STEP_TO_SUBFOLDER.get(step_id)
+        # Normalize the incoming step_id before lookup. The frontend sends
+        # captureKey(step) = "<domain>_<step.id>[_<side>]", but
+        # STEP_TO_SUBFOLDER's keys are the bare step ids.
+        normalized = step_id
+        for prefix in ("live_", "dead_"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        for suffix in ("_left", "_right"):
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)]
+                break
+
+        sub = self.STEP_TO_SUBFOLDER.get(normalized) or self.STEP_TO_SUBFOLDER.get(step_id)
         subfolders = case_folder.get("subfolders", {})
         if sub and sub in subfolders and subfolders[sub]:
             return subfolders[sub]
-        # Unknown step -- put it directly under Live/Dead so it's not lost
         return subfolders.get("live") or subfolders.get("dead") or case_folder["folder_id"]
 
     # ------------------------------------------------------------------
@@ -384,9 +475,6 @@ class GoogleDriveService:
             result = self.service.files().create(
                 body=meta, media_body=media, fields="id, name, webViewLink"
             ).execute()
-            # Make the file viewable by anyone with the link -- matches
-            # how case folders are shared, so a reviewer opening the
-            # folder link doesn't hit "you need permission" on each file.
             self._make_file_viewable(result["id"])
             return {
                 "file_id": result["id"],
@@ -464,9 +552,6 @@ class GoogleDriveService:
             ).execute().get("files", [])
             data = content.encode("utf-8")
             if existing:
-                # Update existing file's content in place -- keeps the
-                # same file ID and link stable across runs, so any saved
-                # links in a downstream system stay valid.
                 media = MediaIoBaseUpload(
                     __import__("io").BytesIO(data),
                     mimetype="text/plain",
@@ -489,3 +574,16 @@ class GoogleDriveService:
         except HttpError as e:
             print(f"[Drive] upload_text({filename}) failed: {e}")
             return None
+
+_drive_singleton = None
+_drive_singleton_lock = threading.Lock()
+
+def get_drive_service() -> GoogleDriveService:
+    """Process-wide singleton. Reuse this everywhere -- fresh instances
+    defeat the folder-ID cache and multiply Drive API calls."""
+    global _drive_singleton
+    if _drive_singleton is None:
+        with _drive_singleton_lock:
+            if _drive_singleton is None:
+                _drive_singleton = GoogleDriveService()
+    return _drive_singleton

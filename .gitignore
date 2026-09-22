@@ -38,3 +38,8 @@ Thumbs.db
 # ===== Local exports (if any accidentally left) =====
 organized_exports/
 uploads/
+
+
+.env
+credentials.json
+token_combined.pickle

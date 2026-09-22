@@ -1,16 +1,12 @@
-import os
-import sqlite3
 import sys
+from services.db import get_conn
 
-# Always use the database sitting next to this script, wherever you run it from
-DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cattle_claims.db")
-conn = sqlite3.connect(DB)
-conn.row_factory = sqlite3.Row
+conn = get_conn()
 
 # Optional: python show_latest.py 5   -> only the 5 newest cases
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
 
-sql = "SELECT * FROM cases ORDER BY created_at DESC, rowid DESC"
+sql = "SELECT * FROM cases ORDER BY created_at DESC"
 if limit:
     sql += f" LIMIT {limit}"
 cases = conn.execute(sql).fetchall()
@@ -19,7 +15,7 @@ if not cases:
     print("No cases found.")
     raise SystemExit
 
-print(f"Database: {DB}")
+print(f"Database: AWS RDS")
 print(f"Total cases shown: {len(cases)}\n")
 
 for case in cases:

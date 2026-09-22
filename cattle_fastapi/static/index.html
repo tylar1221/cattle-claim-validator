@@ -610,8 +610,7 @@ const LIVE_STEPS = [
     hint:"Tap to record a 60 second video of the animal" },
   { id:"scar_injury_live", label:"Scar/Injury", sided:false, required:false, domain:"live", freeform:true,
     hint:"Optional — capture any visible scar or injury, tap capture when ready" },
-  { id:"eardemo_live", label:"Ear Demo", sided:false, required:false, domain:"live", freeform:true,
-    hint:"Testing only — capture any ear tag photo, no detection gate, tap capture when ready" },
+  
   { id:"geotag_live", label:"Geotag", sided:false, required:true, domain:"live", geotag:true, geotagSource:"flank_live",
     hint:"Tap to generate a geotagged version of your Flank photo" },
 ];
@@ -675,15 +674,15 @@ const CATTLE_MODEL_CONFIG = {
   },
   // LIVE flank -- 94.6% mAP50, strong precision/recall balance
   flank_live: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/left_right_live.onnx",
+    url: "./models/left_right_live_int8.onnx",
     inputSize: 640,
     classNames: ["left side", "right side"],
     confThreshold: 0.4,
     iouThreshold: 0.45
-  },
+},
   // LIVE front head -- your strongest model, 99.0% mAP50 / 100% precision
   front_view_live: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/live_cattle_front_head.onnx",
+  url: "./models/fronthead.onnx",
     inputSize: 640,
     classNames: ["front_head"],
     confThreshold: 0.4,
@@ -1703,7 +1702,8 @@ function buildMetadata(source, resolution, exifOverride){
 // Fire-and-forget: never blocks or breaks the existing UI if it fails.
 // =========================================================================
 let caseId = null;
-
+// NEW -- the case's main Drive folder link, once known.
+let caseDriveFolderLink = null;
 // =========================================================================
 // SESSION PERSISTENCE -- NEW, by request. Survives a page refresh, which
 // previously wiped out everything captured so far (in-memory only). Uses
@@ -1965,7 +1965,49 @@ function generateLocalCaseId(){
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   return 'case_' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+async function refreshCaseDriveFolderLink(){
+  if(!caseId) return null;
+  try{
+    const resp = await fetchWithTimeout_(`/api/cases/${caseId}/drive_link`, 6000);
+    if(!resp || !resp.ok) return null;
+    const data = await resp.json();
+    if(data && data.ready && data.drive_folder_link){
+      caseDriveFolderLink = data.drive_folder_link;
+      updateDriveFolderButton();
+      return caseDriveFolderLink;
+    }
+  }catch(err){
+    console.warn('Could not fetch case Drive folder link (not fatal):', err);
+  }
+  return null;
+}
 
+function updateDriveFolderButton(){
+  const btn = document.getElementById('driveFolderBtn');
+  if(!btn) return;
+  if(caseDriveFolderLink){
+    btn.href = caseDriveFolderLink;
+    btn.textContent = "📁 Open Case Folder on Drive";
+    btn.classList.remove('pending');
+    btn.classList.add('show');
+  } else {
+    btn.removeAttribute('href');
+    btn.textContent = "📁 Case folder preparing… (opens once first photo uploads)";
+    btn.classList.add('pending');
+    btn.classList.add('show');
+  }
+}
+
+function scheduleCaseDriveFolderRefresh(){
+  updateDriveFolderButton();
+  refreshCaseDriveFolderLink();
+  let attempts = 0;
+  const iv = setInterval(async () => {
+    attempts++;
+    const link = await refreshCaseDriveFolderLink();
+    if(link || attempts >= 8){ clearInterval(iv); }
+  }, 2000);
+}
 // Ensures a SPECIFIC case exists on the server -- kept separate from the
 // global caseId/ensureCase() below, since the offline queue needs to sync
 // each queued entry's OWN case, which may no longer be the CURRENTLY
@@ -2126,6 +2168,13 @@ async function uploadCaptureToBackend(cap, key){
     // as two separate files.
     cap.backendResult = result;
     cap.queuedOffline = false;
+    if(result && result.case_drive_folder_link){
+      caseDriveFolderLink = result.case_drive_folder_link;
+      updateDriveFolderButton();
+    } else {
+      scheduleCaseDriveFolderRefresh();
+    }
+ 
     try{
       saveSessionState();
       // Only re-render if this capture is still the one stored under this key
@@ -3460,10 +3509,13 @@ fileInput.addEventListener('change', async (e) => {
 });
 
 
-exportBtn.addEventListener('click', () => {
+exportBtn.addEventListener('click', async () => {
+  if(!caseDriveFolderLink){ await refreshCaseDriveFolderLink(); }
   const payload = {
     generatedAt: new Date().toISOString(),
     domain: currentDomain,
+    case_id: caseId,
+    case_drive_folder_link: caseDriveFolderLink || null,
     caseDetails: (typeof window.getCaseDetails === 'function') ? window.getCaseDetails() : null,
     // Includes every step that was actually captured, not just required ones --
     // so the optional Scar/Injury photo (when taken) makes it into the package
@@ -4703,7 +4755,18 @@ async function analyzeCocoCowFrame(step){
   }catch(err){ console.error("COCO cow-detector inference error:", err); }
   cattleDetectBusy = false;
 }
-
+(async () => {
+  try {
+    const resp = await fetch('/api/auth/me');
+    if (!resp.ok) {
+      window.location.href = './login.html';
+      return;
+    }
+  } catch (err) {
+    window.location.href = './login.html';
+    return;
+  }
+})();
 // ---------- Init ----------
 (async () => {
   // TAB-LIFETIME CHECK, by request: restore on a refresh (same tab), but
@@ -4758,6 +4821,10 @@ async function analyzeCocoCowFrame(step){
   // snapshot as the only thing ever saved. Running this only after the
   // restore above has fully finished closes that race.
   scheduleOfflineQueueRetries();
+  if(caseId){
+    updateDriveFolderButton();
+    refreshCaseDriveFolderLink();
+  }
 })();
 
 // A refresh can happen WHILE the background ELA/Tamper Check/Screenshot
@@ -4862,6 +4929,7 @@ document.getElementById('newCaseBtn').addEventListener('click', async () => {
 
   <button class="cd-save" id="cdSaveBtn">Save Case Details</button>
   <div class="cd-status" id="cdStatus"></div>
+  <button class="cd-save" id="logoutBtn" style="background:transparent;border:1px solid var(--line);color:var(--muted);margin-top:10px;">Log Out</button>
 </div>
 
 <script>
@@ -4979,7 +5047,10 @@ document.getElementById('newCaseBtn').addEventListener('click', async () => {
   document.getElementById('cdCloseBtn').addEventListener('click', () => {
     document.getElementById('caseDetailsPanel').classList.remove('show');
   });
-  document.getElementById('cdSaveBtn').addEventListener('click', cdSave);
+  document.getElementById('logoutBtn').addEventListener('click', async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    window.location.href = './login.html';
+  });
 
   cdLoad();
 </script>

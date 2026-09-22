@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Form, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, Form, Request, BackgroundTasks
 
 from services.db import get_conn
 from services.organize import compute_capture_flags, organize_case  # NEW -- organize_case call added below
+from services.auth import require_login
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
 
@@ -16,7 +17,7 @@ async def create_case(
     farmer_name: str | None = Form(None),
     village: str | None = Form(None),
     case_id: str | None = Form(None),        # NEW -- client-generated, so a case can exist
-                                              # locally even before the server has ever seen it
+    user=Depends(require_login),                                          # locally even before the server has ever seen it
                                               # (needed for multiple animals captured entirely
                                               # offline, syncing all at once later)
 ):
@@ -34,16 +35,40 @@ async def create_case(
         case_id = "case_" + uuid.uuid4().hex[:12]
 
     conn.execute(
-        "INSERT INTO cases (id, domain, loan_no, farmer_name, village) VALUES (?,?,?,?,?)",
-        (case_id, domain, loan_no, farmer_name, village),
+        "INSERT INTO cases (id, domain, loan_no, farmer_name, village, created_by_user_id) VALUES (?,?,?,?,?,?)",
+        (case_id, domain, loan_no, farmer_name, village, user["id"]),
     )
     conn.commit()
     conn.close()
     return {"case_id": case_id, "domain": domain}
 
+@router.get("/{case_id}/drive_link")
+async def get_case_drive_link(case_id: str, user=Depends(require_login)):
+    """
+    Returns the case's main Drive folder link (the one containing Live/,
+    Dead/, Forensics/, Case Summary.txt, Case Summary.json).
 
+    `ready` is False while the folder hasn't been created yet -- it gets
+    created on the first successful capture upload (see the background
+    task in api/captures.py), so this can be polled briefly after the
+    first upload until it flips to True.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT drive_folder_id, drive_folder_link FROM cases WHERE id = ?",
+        (case_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"error": "not found", "ready": False}
+    return {
+        "case_id": case_id,
+        "drive_folder_id": row["drive_folder_id"],
+        "drive_folder_link": row["drive_folder_link"],
+        "ready": bool(row["drive_folder_link"]),
+    }
 @router.get("/{case_id}")
-async def get_case(case_id: str):
+async def get_case(case_id: str, user=Depends(require_login)):
     conn = get_conn()
     case = conn.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
     captures = conn.execute(
@@ -78,7 +103,7 @@ CASE_DETAIL_FIELDS = [
 
 
 @router.put("/{case_id}")
-async def update_case_details(case_id: str, request: Request, background_tasks: BackgroundTasks):
+async def update_case_details(case_id: str, request: Request, background_tasks: BackgroundTasks, user=Depends(require_login)):
     form = await request.form()
     conn = get_conn()
     existing = conn.execute("SELECT id FROM cases WHERE id = ?", (case_id,)).fetchone()

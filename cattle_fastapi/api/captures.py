@@ -13,11 +13,11 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from services.google_drive_service import GoogleDriveService, _safe_name
 
-from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, UploadFile, File, Form, BackgroundTasks
 
 from services.db import get_conn
+from services.auth import require_login
 from services.exif_service import analyze_gallery_exif
-from services.eartag_ocr_service import run_ocr_and_store  # NEW -- server-side ear tag digit OCR, now background-only (see note below)
 from services.organize import compute_capture_flags, organize_case  # NEW -- shared flag logic + auto-organize
 
 router = APIRouter(prefix="/api/captures", tags=["captures"])
@@ -153,6 +153,8 @@ async def upload_capture(
     normalize_scale_applied: float | None = Form(None),   # NEW -- Pixel-Size Normalization, infra only, see static/index.html's NORMALIZE_CONFIG
     normalize_skipped: bool | None = Form(None),           # NEW
     normalize_skip_reason: str | None = Form(None),        # NEW
+    user=Depends(require_login),
+
 ):
     # ---------------------------------------------------------------
     # THE ACTUAL RANK-1 ANCHOR. This is read from the server process's
@@ -262,7 +264,6 @@ async def upload_capture(
     # side detection gate, freeform capture like Owner Photo/Scar-Injury)
     # to let OCR be tested through the real live-capture flow without
     # fighting the ear_tag step's detection requirements.
-    is_ear_tag_step = is_image and step_id in ("dead_ear_tag", "live_ear_tag_live", "live_eardemo_live")
 
     # Cross-check: how far does the client's claimed capture time sit from
     # the moment we actually received it? Computed HERE, not trusted from
@@ -287,9 +288,9 @@ async def upload_capture(
             device_timezone, timezone_mismatch_flag,
             device_date_changed, device_date_wrong_at_anchor,
             resolution, device_info, tamper_check_score, tamper_check_band,
-            normalize_scale_applied, normalize_skipped, normalize_skip_reason,
-            ocr_signals
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            normalize_scale_applied, normalize_skipped, normalize_skip_reason
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        RETURNING id""",
         (
             stored_name, case_id, step_id, source,
             server_received_at.isoformat(),
@@ -307,11 +308,10 @@ async def upload_capture(
             normalize_scale_applied,
             None if normalize_skipped is None else (1 if normalize_skipped else 0),
             normalize_skip_reason,
-            None,  # ocr_signals -- NULL at insert time; filled in by the run_ocr_and_store background task below for ear tag steps, stays NULL for every other step
         ),
     )
+    capture_id = cur.fetchone()["id"]
     conn.commit()
-    capture_id = cur.lastrowid
     conn.close()
 
     # ---------------------------------------------------------------
@@ -335,16 +335,30 @@ async def upload_capture(
         capture_id, contents, case_id, step_id, drive_filename, mime,
     )
 
-    if is_ear_tag_step:
-        background_tasks.add_task(run_ocr_and_store, capture_id, contents)
-
+    
     background_tasks.add_task(organize_case, case_id)
+    # NEW -- surface whatever case-folder link we already have on record.
+    # On the FIRST capture of a case this will be None (the folder is
+    # created in the background task just scheduled above); on every later
+    # capture it's already populated. The frontend also re-fetches via
+    # GET /api/cases/{case_id}/drive_link once the background task finishes.
+    conn_link = get_conn()
+    link_row = conn_link.execute(
+        "SELECT drive_folder_id, drive_folder_link FROM cases WHERE id = ?",
+        (case_id,),
+    ).fetchone()
+    conn_link.close()
+    case_drive_folder_id = link_row["drive_folder_id"] if link_row else None
+    case_drive_folder_link = link_row["drive_folder_link"] if link_row else None
+
     return {
         "id": capture_id,
         "filename": stored_name,
         "server_received_at": server_received_at.isoformat(),
         "drift_server_vs_device_ms": drift_ms,
-        "drive_upload_pending": True,   # NEW -- the actual Drive link lands a moment later, see drive_file_link on GET /{case_id}
+        "drive_upload_pending": True,
+        "case_drive_folder_id": case_drive_folder_id,       # NEW
+        "case_drive_folder_link": case_drive_folder_link,   # NEW   # NEW -- the actual Drive link lands a moment later, see drive_file_link on GET /{case_id}
         # THREE separate signals now, not one conflated "drift_flag":
         #
         # 1. clock_tamper_flag -- the RELIABLE signal. Comes from the
@@ -414,12 +428,11 @@ async def upload_capture(
         "normalize_scale_applied": normalize_scale_applied,   # NEW -- Pixel-Size Normalization, infra only
         "normalize_skipped": normalize_skipped,
         "normalize_skip_reason": normalize_skip_reason,
-        "ocr_pending": is_ear_tag_step,  # NEW -- True means OCR is running in the background; check organized_exports/case_summary.txt shortly after, not this response
     }
 
 
 @router.post("/{capture_id}/tamper_check")
-async def update_tamper_check(capture_id: int, tamper_check_score: int = Form(...), tamper_check_band: str = Form(...)):
+async def update_tamper_check(capture_id: int, tamper_check_score: int = Form(...), tamper_check_band: str = Form(...), user=Depends(require_login)):
     """
     NEW -- a small, separate update, NOT a re-upload. The Tamper Check
     score is computed in the browser in a background step that runs AFTER
@@ -447,7 +460,7 @@ async def update_tamper_check(capture_id: int, tamper_check_score: int = Form(..
 
 
 @router.get("/{case_id}")
-async def list_captures_for_case(case_id: str):
+async def list_captures_for_case(case_id: str, user=Depends(require_login)):
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM captures WHERE case_id = ? ORDER BY id", (case_id,)
