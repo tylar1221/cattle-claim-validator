@@ -5047,6 +5047,8 @@ document.getElementById('newCaseBtn').addEventListener('click', async () => {
   document.getElementById('cdCloseBtn').addEventListener('click', () => {
     document.getElementById('caseDetailsPanel').classList.remove('show');
   });
+  document.getElementById('cdSaveBtn').addEventListener('click', cdSave);
+
   document.getElementById('logoutBtn').addEventListener('click', async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     window.location.href = './login.html';
