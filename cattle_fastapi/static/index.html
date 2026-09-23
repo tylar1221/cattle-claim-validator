@@ -642,13 +642,14 @@ const COCO_MODEL_CONFIG = {
 // configured correctly from your real training results.
 const CATTLE_MODEL_CONFIG = {
   // DEAD flank -- fixes flip-bug applied, final trained result 91.7% mAP50
-  flank: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/left_right_flank_dead.onnx",   // flank_best.onnx (dead)
+  // DEAD flank
+flank_dead: {
+    url: "./models/left_right_flank_dead_int8.onnx",
     inputSize: 640,
-    classNames: ["flank_left", "flank_right"],
+    classNames: ["left side", "right side"],
     confThreshold: 0.4,
     iouThreshold: 0.45
-  },
+},
   // DEAD head/front-view -- 87.5% mAP50. Known open issue: some false positives
   // on non-head images, some left/right confusion (head_left weaker class).
   // Remember: use iou=0.3 at inference, not the default 0.45, to avoid
