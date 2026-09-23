@@ -1,0 +1,1 @@
+cattle_fastapi/static/models/*.onnx filter=lfs diff=lfs merge=lfs -text
