@@ -43,3 +43,5 @@ uploads/
 .env
 credentials.json
 token_combined.pickle
+# ONNX model files
+cattle_fastapi/static/models/*.onnx

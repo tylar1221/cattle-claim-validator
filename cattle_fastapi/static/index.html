@@ -826,6 +826,19 @@ const camHint       = document.getElementById('camHint');
 const qualityDebug       = document.getElementById('qualityDebug');
 const qualityDebugToggle = document.getElementById('qualityDebugToggle');
 let qualityDebugOn = false;
+
+// ---- Step 1: device speed tracking (measurement only, no behavior change) ----
+let tickTimings = [];              // last N tick durations in ms
+const TICK_TIMING_SAMPLES = 20;    // how many to keep for the rolling average
+
+function recordTickTiming(ms){
+  tickTimings.push(ms);
+  if(tickTimings.length > TICK_TIMING_SAMPLES) tickTimings.shift();
+}
+function averageTickMs(){
+  if(!tickTimings.length) return 0;
+  return tickTimings.reduce((a,b)=>a+b,0) / tickTimings.length;
+}
 qualityDebugToggle.addEventListener('click', () => {
   qualityDebugOn = !qualityDebugOn;
   qualityDebug.style.display = qualityDebugOn ? 'block' : 'none';
@@ -849,11 +862,12 @@ function renderQualityDebug(){
   const stepId = currentStep() ? currentStep().id : null;
   const stepCfg = stepId ? (OCCUPANCY_BAND_CONFIG[stepId] || {}) : {};
   const stepMax = stepCfg.max != null ? stepCfg.max : null;
-  const effectiveMin = stepCfg.min != null ? stepCfg.min : FRAME_QUALITY_CONFIG.minOccupancyRatio;   // NEW -- was always reading the global floor, ignoring any per-step min override
+  const effectiveMin = stepCfg.min != null ? stepCfg.min : FRAME_QUALITY_CONFIG.minOccupancyRatio;
   const occupancyWant = stepMax != null
     ? `${(effectiveMin*100).toFixed(0)}–${(stepMax*100).toFixed(0)}%`
     : `≥${(effectiveMin*100).toFixed(0)}%`;
   qualityDebug.textContent =
+    `tick:       ${q.tickMs != null ? q.tickMs.toFixed(0) : '—'}ms  (avg ${q.avgTickMs != null ? q.avgTickMs.toFixed(0) : '—'}ms)\n` +
     `res: ${q.videoRes || '—'}\n` +
     `brightness: ${q.brightness !== null ? q.brightness.toFixed(0) : '—'} (40–230)\n` +
     `sharpness:  ${q.sharpness !== null ? q.sharpness.toFixed(1) : '—'} (≥${POST_CAPTURE_SHARPNESS_CONFIG.minSharpness})\n` +
@@ -3794,10 +3808,15 @@ function assessBasicFrameQuality(video){
   if(brightness < cfg.minBrightness) return { ok:false, reason:"Too dark — move to better light" };
   if(brightness > cfg.maxBrightness) return { ok:false, reason:"Too bright / overexposed — reduce glare or flash" };
 
-  // Shared with the post-capture check -- see the comment above.
-  const sharpness = _computeBlockMaxSharpnessFromSource(video, video.videoWidth, video.videoHeight);
-  if(sharpness < POST_CAPTURE_SHARPNESS_CONFIG.minSharpness) return { ok:false, reason:"Too blurry — hold steady and refocus", brightness, sharpness };
-
+   // ---- Step 2: live gate uses a CHEAP sharpness calc (small fixed working size) ----
+  // The post-capture check keeps its careful ratio-based sizing (it runs once,
+  // it's allowed to be expensive). The live gate only needs to answer
+  // "roughly sharp vs roughly blurry" to gate capture readiness -- it does
+  // NOT need the accuracy of the final decision, which the post-capture
+  // check makes anyway. Running the full-resolution downsample here was
+  // the single most expensive thing in every tick.
+  const sharpness = _computeCheapLiveSharpness(gray, cfg.sampleW, cfg.sampleH);
+  if(sharpness < LIVE_SHARPNESS_CONFIG.minSharpness) return { ok:false, reason:"Too blurry — hold steady and refocus", brightness, sharpness };
   return { ok:true, reason:null, brightness, sharpness };
 }
 
@@ -3879,6 +3898,50 @@ const postCaptureQualityCtx = postCaptureQualityCanvas.getContext('2d', { willRe
 // -- ONE calculation, not two implementations that happen to look
 // similar. source can be a <video> element OR a <canvas> (a captured
 // frame); srcW/srcH must be that source's actual native dimensions.
+// ---- Step 2: cheap live-gate sharpness ----
+// Uses the ALREADY-COMPUTED grayscale buffer from the small 160x120 sample
+// (see assessBasicFrameQuality) -- zero additional getImageData, zero
+// additional canvas work. This is the whole point of Step 2: the live gate
+// no longer touches the native-resolution video frame at all.
+//
+// Same block-max technique as the post-capture check, just at a much
+// smaller working size. Because the working size is ~9x smaller, the
+// absolute number this produces is HIGHER than the post-capture check's
+// number for the same photo (blocking artifacts at low resolution read as
+// "sharper" gradients) -- hence a separate, higher threshold below.
+const LIVE_SHARPNESS_CONFIG = {
+  minSharpness: 60,   // CALIBRATE AFTER STEP 1 TESTING -- see note below
+};
+
+function _computeCheapLiveSharpness(gray, w, h){
+  // gray is the SAME Float32Array (length w*h) already built in
+  // assessBasicFrameQuality for the brightness calculation -- we reuse it
+  // rather than recomputing. Block-max across a 6x6 grid (smaller grid
+  // than post-capture's 8x8, matching the smaller working size).
+  const grid = 6;
+  const blockW = Math.floor(w / grid), blockH = Math.floor(h / grid);
+  let maxBlockMean = 0;
+  for(let by = 0; by < grid; by++){
+    for(let bx = 0; bx < grid; bx++){
+      const y0 = Math.max(1, by*blockH), y1 = Math.min(h-1, (by+1)*blockH);
+      const x0 = Math.max(1, bx*blockW), x1 = Math.min(w-1, (bx+1)*blockW);
+      let sum = 0, count = 0;
+      for(let y = y0; y < y1; y++){
+        for(let x = x0; x < x1; x++){
+          const i = y*w + x;
+          sum += Math.abs(gray[i+1]-gray[i-1]) + Math.abs(gray[i+w]-gray[i-w]);
+          count++;
+        }
+      }
+      if(count > 0){
+        const mean = sum / count;
+        if(mean > maxBlockMean) maxBlockMean = mean;
+      }
+    }
+  }
+  return maxBlockMean;
+}
+
 function _computeBlockMaxSharpnessFromSource(source, srcW, srcH){
   const cfg = POST_CAPTURE_SHARPNESS_CONFIG;
   let workW = Math.round(srcW * cfg.downsampleRatio);
@@ -4187,9 +4250,31 @@ function debugReset(){ /* placeholder retained for structural parity with earlie
 // running real AI inference throughout the whole live-camera session,
 // which was very likely contributing to the general lag/sluggishness
 // reported alongside the black-screen issue.
-function startDetection(){ stopDetection(); detectTimer = setInterval(analyzeTick, 400); }
+// ---- Step 3: adaptive interval, driven by Step 1's own measurements ----
+const ADAPTIVE_TICK_CONFIG = {
+  baseInterval: 400,      // floor -- never go faster than this
+  maxInterval: 1200,      // ceiling -- never go slower than this, so "ready" still feels responsive
+  targetBusyRatio: 0.5,   // aim to keep the tick doing work ~50% of the time, idle the other ~50%
+};
+function currentAdaptiveInterval(){
+  const avg = averageTickMs();
+  if(!avg) return ADAPTIVE_TICK_CONFIG.baseInterval;
+  const wanted = avg / ADAPTIVE_TICK_CONFIG.targetBusyRatio;
+  return Math.min(ADAPTIVE_TICK_CONFIG.maxInterval, Math.max(ADAPTIVE_TICK_CONFIG.baseInterval, wanted));
+}
+function startDetection(){
+  stopDetection();
+  const runAndReschedule = () => {
+    analyzeTick().finally(() => {
+      if(detectTimer !== null){   // stopDetection() may have fired mid-flight
+        detectTimer = setTimeout(runAndReschedule, currentAdaptiveInterval());
+      }
+    });
+  };
+  detectTimer = setTimeout(runAndReschedule, ADAPTIVE_TICK_CONFIG.baseInterval);
+}
 function stopDetection(){
-  if(detectTimer){ clearInterval(detectTimer); detectTimer=null; }
+  if(detectTimer){ clearTimeout(detectTimer); detectTimer=null; }
   readyStreak = 0; isReady = false;
   guideMain.classList.remove('ready'); guideHalo.classList.remove('ready'); camHint.classList.remove('ready');
 }
@@ -4208,8 +4293,24 @@ async function analyzeTick(){
   // changing even after the image has been captured."
   if(viewfinder.classList.contains('captured')) return;
 
+  // ---- Step 1: time the whole tick (measurement only) ----
+  const __tickStart = performance.now();
+  try {
+    await analyzeTickInner();
+  } finally {
+    const __ms = performance.now() - __tickStart;
+    recordTickTiming(__ms);
+    lastQualityReadout.tickMs = __ms;
+    lastQualityReadout.avgTickMs = averageTickMs();
+    if(qualityDebugOn) renderQualityDebug();
+  }
+}
+
+async function analyzeTickInner(){
   tickCounter++;
   const step = currentStep();
+  // FRAME QUALITY GATE -- runs before anything else, for every step type
+
 
   // FRAME QUALITY GATE -- runs before anything else, for every step type
   // (including freeform/video steps, which previously had NO checks at
