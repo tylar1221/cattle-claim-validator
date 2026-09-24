@@ -134,6 +134,35 @@
 
   .guide-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
   .viewfinder.captured .guide-svg{opacity:0;}
+  /* Reference photo transparent overlay — sits over camera feed */
+.ref-overlay{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  opacity:0;
+  pointer-events:none;
+  transition:opacity .3s ease;
+  z-index:2;
+}
+
+.ref-overlay.show{
+  opacity:0.7;
+  filter:drop-shadow(0 0 3px rgba(255,255,255,.85));
+}
+
+.viewfinder.captured .ref-overlay{
+  opacity:0;
+}
+
+.viewfinder.has-ref-overlay .guide-svg{
+  opacity:0;
+}
+
+.viewfinder.has-ref-overlay .corner{
+  opacity:0;
+}
   .guide-silhouette-halo{fill:none;stroke:#000;stroke-width:14;stroke-linejoin:round;stroke-linecap:round;opacity:.45;}
   .guide-silhouette{fill:none;stroke:#fff;stroke-width:6;stroke-linejoin:round;stroke-linecap:round;filter:drop-shadow(0 0 6px rgba(0,0,0,.5));transition:stroke .2s ease;}
   .guide-silhouette.ready{stroke:#8CC63F;}
@@ -359,8 +388,12 @@
 
   <main>
     <div class="viewfinder" id="viewfinder">
-      <video id="video" autoplay playsinline muted></video>
-      <img class="frame-img" id="frameImg" alt="Captured photo">
+    <video id="video" autoplay playsinline muted></video>
+
+    <!-- Reference photo overlay -->
+    <img class="ref-overlay" id="refOverlay" alt="">
+
+    <img class="frame-img" id="frameImg" alt="Captured photo">
       <video class="frame-img" id="playbackVideo" playsinline controls style="display:none;"></video>
       <img class="frame-img" id="elaImg" alt="Error Level Analysis" style="display:none;">
 
@@ -937,6 +970,8 @@ const refLightboxImg     = document.getElementById('refLightboxImg');
 const refLightboxCaption = document.getElementById('refLightboxCaption');
 const refLightboxClose   = document.getElementById('refLightboxClose');
 
+const refOverlay = document.getElementById('refOverlay');
+
 // ---------- Custom in-app alert (replaces native alert(), which shows the
 // site's URL as an uneditable browser-controlled title bar) ----------
 const appAlertBackdrop = document.getElementById('appAlertBackdrop');
@@ -1048,33 +1083,7 @@ function selectStep(idx){
   debugReset();
   updateSideToggleUI(step);
   updateRefButton(step);
-  // Gallery upload IS allowed for Geotag steps -- lets you upload a photo
-  // already stamped by a dedicated app (e.g. "GPS Map Camera"), as an
-  // alternative to tapping capture to auto-generate one from the Flank photo.
-  // Gallery Upload removed entirely, by explicit decision -- every photo
-  // step is now Live-Capture-only. Reasoning: the field workflow captures
-  // every required photo (including Owner Photo and Scar/Injury) in one
-  // continuous live session anyway, so Gallery Upload wasn't actually
-  // needed for the "poor rural network" case it was originally kept for
-  // (Live Capture's own offline queue already handles that). Removing it
-  // also closes the specific gap where a gallery-selected photo's clock
-  // tampering couldn't be verified (Android's Photo Picker strips GPS
-  // data before it ever reaches the browser, and file-editor tools can
-  // rewrite EXIF directly -- see the extended discussion on this).
-  // Video already had no gallery-upload equivalent at all.
-  //
-  // ⚠️ TEMPORARILY RE-ENABLED FOR TESTING ONLY (the line below is
-  // commented out, not removed) -- needed to test whether Error Level
-  // Analysis / Tamper Check can detect AI-edited images when the actual
-  // edited FILE is uploaded directly, since Live Capture's one-pass
-  // camera JPEG encode erases the compression-history evidence ELA
-  // depends on (confirmed: re-photographing an AI-edited image off a
-  // screen via Live Capture cannot carry that evidence through at all --
-  // this isn't a weeaker signal, it's genuinely gone by the time ELA runs).
-  // RE-HIDE by uncommenting the line below once this testing is done --
-  // the underlying reasons Gallery Upload was removed (above) still apply
-  // for real field use; this is a deliberate, temporary exception.
-  // galleryBtn.style.display = 'none';
+ 
   maskBoxKey = "";
   readyStreak = 0; isReady = false;
   guideMain.classList.remove('ready'); guideHalo.classList.remove('ready'); camHint.classList.remove('ready');
@@ -3348,11 +3357,38 @@ galleryBtn.addEventListener('click', () => fileInput.click());
 // ---------- Reference photo button + lightbox ----------
 function updateRefButton(step){
   const ref = REFERENCE_PHOTOS[referenceKeyFor(step)];
+
   if(ref && ref.url){
+
+    // Show reference thumbnail button
     refBtn.style.display = 'flex';
     refBtnThumb.src = ref.url;
+
+    // Load transparent overlay version
+    refOverlay.onerror = () => {
+      refOverlay.onerror = null;
+      refOverlay.src = ref.url;
+    };
+
+    // Prefer PNG overlay version
+    refOverlay.src =
+      './ref/' +
+      ref.url.split('/').pop().replace(/\.\w+$/, '.png');
+
+    // Show overlay
+    refOverlay.classList.add('show');
+    viewfinder.classList.add('has-ref-overlay');
+
   } else {
-    refBtn.style.display = 'none';   // hide until that step's photo is uploaded
+
+    // Hide reference button
+    refBtn.style.display = 'none';
+
+    // Remove overlay
+    refOverlay.src = '';
+    refOverlay.classList.remove('show');
+
+    viewfinder.classList.remove('has-ref-overlay');
   }
 }
 refBtn.addEventListener('click', () => {
