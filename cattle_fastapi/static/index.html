@@ -4939,13 +4939,14 @@ async function analyzeCocoCowFrame(step){
 (async () => {
   try {
     const resp = await fetch('/api/auth/me');
-    if (!resp.ok) {
+    if (resp.status === 401) {
       window.location.href = './login.html';
-      return;
     }
+    // any other non-ok status: don't redirect, just continue
   } catch (err) {
-    window.location.href = './login.html';
-    return;
+    // Network/offline failure — NOT the same as "not logged in".
+    // Don't redirect; let the app keep working offline.
+    console.warn('Could not verify login (offline?) — continuing:', err);
   }
 })();
 // ---------- Init ----------

@@ -10,13 +10,14 @@
 // bump it means returning users keep silently using a stale cached copy.
 // =========================================================================
 
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v7';
 const CACHE_NAME = `cattle-claim-fastapi-${CACHE_VERSION}`;
 
 // ---- App shell: the local files this app is built from ----
 const SHELL_ASSETS = [
   './',
   './index.html',
+  './login.html',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -146,14 +147,15 @@ self.addEventListener('fetch', (event) => {
 
   if (req.mode === 'navigate') {
     event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
       try {
         const fresh = await fetch(req, { cache: 'no-store' });
-        const cache = await caches.open(CACHE_NAME);
-        cache.put('./index.html', fresh.clone());
+        cache.put(req, fresh.clone());
         return fresh;
       } catch (err) {
-        const cache = await caches.open(CACHE_NAME);
-        return (await cache.match('./index.html')) || (await cache.match('./'));
+        return (await cache.match(req))
+            || (await cache.match('./index.html'))
+            || (await cache.match('./'));
       }
     })());
     return;
