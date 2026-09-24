@@ -492,6 +492,8 @@
 
     <div class="controls">
       <button class="btn-round" id="switchBtn" title="Switch camera">⟳</button>
+      <button class="btn-round" id="pauseBtn" title="Pause/Resume recording" style="display:none;">⏸️</button>
+
       <button class="shutter" id="shutterBtn" title="Capture"></button>
       <button class="btn-round" id="galleryBtn" title="Upload from gallery">🖼️</button>
       <button class="btn-round ref-btn" id="refBtn" title="See reference photo" style="display:none;">
@@ -971,7 +973,7 @@ const refLightbox        = document.getElementById('refLightbox');
 const refLightboxImg     = document.getElementById('refLightboxImg');
 const refLightboxCaption = document.getElementById('refLightboxCaption');
 const refLightboxClose   = document.getElementById('refLightboxClose');
-
+const pauseBtn = document.getElementById('pauseBtn');
 const refOverlay = document.getElementById('refOverlay');
 
 // ---------- Custom in-app alert (replaces native alert(), which shows the
@@ -2515,11 +2517,27 @@ switchBtn.addEventListener('click', () => {
   facingMode = (facingMode === "environment") ? "user" : "environment";
   startCamera();
 });
-
+pauseBtn.addEventListener('click', () => {
+  if(!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if(!isPaused){
+    mediaRecorder.pause();
+    isPaused = true;
+    pauseBtn.textContent = '▶️';
+    pauseBtn.title = 'Resume recording';
+    shutterBtn.classList.remove('recording');   // stop the pulsing red animation while paused
+  } else {
+    mediaRecorder.resume();
+    isPaused = false;
+    pauseBtn.textContent = '⏸️';
+    pauseBtn.title = 'Pause recording';
+    shutterBtn.classList.add('recording');
+  }
+});
 let isRecording = false;
 let isGeneratingGeotag = false;
 let mediaRecorder = null;
-
+let isPaused = false;
+let recCountdownInterval = null;   // NEW — needs to be stoppable from onstop
 // =========================================================================
 // GEOTAG generation -- takes the already-captured Flank photo (whichever
 // side), draws it onto a canvas, and overlays a dark info panel with the
@@ -3118,34 +3136,46 @@ async function startVideoRecording(step){
     };
     reader.readAsDataURL(blob);
 
+    
     isRecording = false;
+    isPaused = false;
     recIndicator.classList.remove('show');
     shutterBtn.classList.remove('recording');
+    pauseBtn.style.display = 'none';        // NEW
+    clearInterval(recCountdownInterval);    // NEW
+    recCountdownInterval = null;
   };
 
   mediaRecorder.start();
   isRecording = true;
+  isPaused = false;
   recIndicator.classList.add('show');
   shutterBtn.classList.add('recording');
+  pauseBtn.style.display = 'flex';       // NEW — show pause control
+  pauseBtn.textContent = '⏸️';
 
-  let secondsLeft = 60;
-  recCountdownText.textContent = formatRecCountdown(secondsLeft);
-  const countdownInterval = setInterval(() => {
-    secondsLeft--;
-    if(secondsLeft > 0){
-      recCountdownText.textContent = formatRecCountdown(secondsLeft);
-    } else {
-      clearInterval(countdownInterval);
+  // NEW — count UP, no cap, doesn't advance while paused
+  let secondsElapsed = 0;
+  recCountdownText.textContent = formatRecCountdown(secondsElapsed);
+  recCountdownInterval = setInterval(() => {
+    if(!isPaused){
+      secondsElapsed++;
+      recCountdownText.textContent = formatRecCountdown(secondsElapsed);
     }
   }, 1000);
 
-  setTimeout(() => {
-    if(mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-  }, 60000);
+  // ⚠️ REMOVED: the setTimeout(...) that force-stopped at 60000ms is gone —
+  // recording now only stops when the user taps the shutter again.
 }
 
 shutterBtn.addEventListener('click', async () => {
-  if(isRecording || isGeneratingGeotag) return;
+  if(isGeneratingGeotag) return;
+  if(isRecording){
+    if(mediaRecorder && mediaRecorder.state !== 'inactive'){
+      mediaRecorder.stop();   // finalizes the clip — triggers onstop, which saves it
+    }
+    return;
+  }
   const step = currentStep();
   const key = captureKey(step);
   if(captures[key]){
@@ -4443,7 +4473,9 @@ async function analyzeTickInner(){
     if(step.video && !audioAvailable){
       hintMsg += " ⚠️ No microphone access — this recording will be SILENT";
     }
-    camHintText.textContent = isRecording ? "" : hintMsg;
+    camHintText.textContent = isRecording
+  ? (isPaused ? "Paused — tap ▶️ to resume, or ⏹ shutter to finish" : "Recording… tap ⏸ to pause, or shutter to finish")
+  : hintMsg;
     return;
   }
   const cfg = CATTLE_MODEL_CONFIG[step.id];
