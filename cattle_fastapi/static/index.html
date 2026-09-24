@@ -3214,7 +3214,10 @@ shutterBtn.addEventListener('click', async () => {
   // ⚠️ BUG FIX: re-check sharpness on the ACTUAL captured frame, not just
   // the live feed a moment before -- see assessCanvasSharpness's comment
   // for why the 400ms-interval live gate alone can't close this gap.
-  const postCaptureSharpness = (!step.video && !step.geotag) ? assessCanvasSharpness(canvas) : { ok:true, sharpness:null, severelyBlurry:false };
+  const postCaptureSharpness =
+  (!step.video && !step.geotag && !RAW_CAPTURE_STEPS.has(step.id))
+    ? assessCanvasSharpness(canvas)
+    : { ok:true, sharpness:null, severelyBlurry:false };
 
   // REJECT TIER -- unlike the WARN case below (flagged for review, photo
   // kept), severe blur is refused outright here, before the photo is even
@@ -3237,14 +3240,20 @@ shutterBtn.addEventListener('click', async () => {
   // model (CATTLE_MODEL_CONFIG entry) -- freeform/video/geotag steps
   // have no detection to re-check in the first place.
   const cattleCfg = CATTLE_MODEL_CONFIG[step.id];
-  if(cattleCfg && cattleCfg.url){
+
+if(
+  cattleCfg &&
+  cattleCfg.url &&
+  !RAW_CAPTURE_STEPS.has(step.id)
+){
     const reverify = await verifyCapturedFrameStillMatches(step, cattleCfg, canvas);
+
     if(!reverify.ok){
       await showAppAlert(reverify.reason);
       showLive();
       return;
     }
-  }
+}
 
   // Pixel-Size Normalization -- see NORMALIZE_CONFIG's honesty note
   // above. Only applies to steps with a matched bounding box from a
@@ -4341,7 +4350,11 @@ async function analyzeTick(){
     if(qualityDebugOn) renderQualityDebug();
   }
 }
-
+const RAW_CAPTURE_STEPS = new Set([
+  "ear_tag",
+  "ear_tag_live",
+  "rear_view_live"
+]);
 async function analyzeTickInner(){
   tickCounter++;
   const step = currentStep();
@@ -4354,22 +4367,37 @@ async function analyzeTickInner(){
   // reaches "ready", regardless of what any detection path below would
   // otherwise find. Skipped only for the geotag step, which doesn't use
   // the live camera at all -- it composites an existing photo.
-  if(!step.geotag){
+  const NO_MODEL_CAPTURE_STEPS = RAW_CAPTURE_STEPS;
+
+  if(!step.geotag && !NO_MODEL_CAPTURE_STEPS.has(step.id)){
     const quality = assessBasicFrameQuality(video);
-    lastQualityReadout.brightness = quality.brightness !== undefined ? quality.brightness : null;
-    lastQualityReadout.sharpness = quality.sharpness !== undefined ? quality.sharpness : null;
-    lastQualityReadout.videoRes = video.videoWidth ? `${video.videoWidth}x${video.videoHeight}` : null;
+
+    lastQualityReadout.brightness =
+      quality.brightness !== undefined ? quality.brightness : null;
+
+    lastQualityReadout.sharpness =
+      quality.sharpness !== undefined ? quality.sharpness : null;
+
+    lastQualityReadout.videoRes =
+      video.videoWidth
+        ? `${video.videoWidth}x${video.videoHeight}`
+        : null;
+
     if(!quality.ok){
       lastQualityReadout.occupancy = null;
       renderQualityDebug();
+
       partBox.style.display = 'none';
       partBox2.style.display = 'none';
       partBox3.style.display = 'none';
+
       camHint.classList.remove('ready');
       camHintText.textContent = quality.reason;
+
       lastMatchedBox = null;
-      return;  // don't burn a YOLO inference pass on a frame we already know is unusable
+      return;
     }
+
     renderQualityDebug();
   }
 
@@ -4389,6 +4417,19 @@ async function analyzeTickInner(){
     }
     return;
   }
+  if(NO_MODEL_CAPTURE_STEPS.has(step.id)){
+  partBox.style.display = 'none';
+  partBox2.style.display = 'none';
+  partBox3.style.display = 'none';
+
+  lastMatchedBox = null;
+  lastMatchedBoxVideoRes = null;
+
+  camHint.classList.add('ready');
+  camHintText.textContent = step.hint;
+
+  return;
+}
   if(step.freeform || step.video){
     // No model, no border -- e.g. Owner Photo, Scar/Injury, Video. Always
     // "ready", no detection required, user just frames/records themselves.
