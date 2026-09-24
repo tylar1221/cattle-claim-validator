@@ -694,18 +694,18 @@ flank_dead: {
     confThreshold: 0.4,
     iouThreshold: 0.3
   },
-  // DEAD ear tag -- its own dedicated step now (previously only shown as a
-  // secondary box during Head). Reuses the same horns+ear_tag model,
-  // filtered to just the "ear_tag" class (index 0) so it gates readiness
-  // on its own here, same pattern as ear_tag_live below.
-  ear_tag: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/eartags_horn.onnx",
-    inputSize: 640,
-    classNames: ["ear_tag", "horn"],
-    onlyClassIndex: 0,
-    confThreshold: 0.25,
-    iouThreshold: 0.45
-  },
+  // // DEAD ear tag -- its own dedicated step now (previously only shown as a
+  // // secondary box during Head). Reuses the same horns+ear_tag model,
+  // // filtered to just the "ear_tag" class (index 0) so it gates readiness
+  // // on its own here, same pattern as ear_tag_live below.
+  // ear_tag: {
+  //   url: "https://raw.githubusercontent.com/kshitij435/cattle/main/eartags_horn.onnx",
+  //   inputSize: 640,
+  //   classNames: ["ear_tag", "horn"],
+  //   onlyClassIndex: 0,
+  //   confThreshold: 0.25,
+  //   iouThreshold: 0.45
+  // },
   // LIVE flank -- 94.6% mAP50, strong precision/recall balance
   flank_live: {
     url: "./models/left_right_live_int8.onnx",
@@ -721,26 +721,26 @@ flank_dead: {
     classNames: ["front_head"],
     confThreshold: 0.4,
     iouThreshold: 0.3
-  },
-  // LIVE rear view -- reused from the original dead-cattle rear-view model,
-  // per your instruction that rear view is only needed for live, not dead.
-  rear_view_live: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/best.onnx",
-    inputSize: 640,
-    classNames: ["cattle-rear"],
-    confThreshold: 0.4,
-    iouThreshold: 0.45
-  },
+  }
+  // // LIVE rear view -- reused from the original dead-cattle rear-view model,
+  // // per your instruction that rear view is only needed for live, not dead.
+  // rear_view_live: {
+  //   url: "https://raw.githubusercontent.com/kshitij435/cattle/main/best.onnx",
+  //   inputSize: 640,
+  //   classNames: ["cattle-rear"],
+  //   confThreshold: 0.4,
+  //   iouThreshold: 0.45
+  // },
   // LIVE ear tag -- reusing the horns+ear_tag model, filtered to just the
   // ear_tag class (class index 0 in that model's training: ['ear_tag','horn']).
-  ear_tag_live: {
-    url: "https://raw.githubusercontent.com/kshitij435/cattle/main/eartags_horn.onnx",   // horns_eartag_best.onnx
-    inputSize: 640,
-    classNames: ["ear_tag", "horn"],
-    onlyClassIndex: 0,   // <-- restricts detection to just "ear_tag", ignores "horn" for this step
-    confThreshold: 0.25,
-    iouThreshold: 0.45
-  }
+  // ear_tag_live: {
+  //   url: "https://raw.githubusercontent.com/kshitij435/cattle/main/eartags_horn.onnx",   // horns_eartag_best.onnx
+  //   inputSize: 640,
+  //   classNames: ["ear_tag", "horn"],
+  //   onlyClassIndex: 0,   // <-- restricts detection to just "ear_tag", ignores "horn" for this step
+  //   confThreshold: 0.25,
+  //   iouThreshold: 0.45
+  // }
   // DEAD muzzle has no dedicated trained model -- falls back to the pixel heuristic (see analyzeTick).
   // LIVE muzzle (muzzle_live) has no dedicated model either -- same fallback.
 };

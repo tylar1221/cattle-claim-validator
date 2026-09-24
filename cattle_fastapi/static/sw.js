@@ -33,7 +33,6 @@ const MODEL_ASSETS = [
   'https://raw.githubusercontent.com/kshitij435/cattle/main/yolov8n.onnx',
   './models/left_right_flank_dead_int8.onnx',
   'https://raw.githubusercontent.com/kshitij435/cattle/main/head_left_right.onnx',
-  'https://raw.githubusercontent.com/kshitij435/cattle/main/eartags_horn.onnx',
   './models/left_right_live_int8.onnx',
   './models/fronthead_int8.onnx',
   'https://raw.githubusercontent.com/kshitij435/cattle/main/live_cattle_front_head.onnx',
