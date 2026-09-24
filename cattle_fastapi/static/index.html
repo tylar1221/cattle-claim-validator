@@ -602,6 +602,8 @@ const BORDERS = {
 // ---- DEAD CATTLE (claim documentation) ----
 // Per your instruction: Rear View is NOT used for dead cattle -- removed.
 const DEAD_STEPS = [
+  { id:"video", label:"Video", sided:false, required:true, domain:"dead", video:true,
+    hint:"Tap to record a 60 second video of the animal" },
   { id:"flank", label:"Flank", sided:true, required:true, domain:"dead",
     variants:{left:"left_flank", right:"right_flank"},
     hint:"Stand to the animal's visible side, fit the full body in the outline" },
@@ -615,8 +617,7 @@ const DEAD_STEPS = [
     hint:"Get close to the ear tag, keep the numbers readable" },
   { id:"owner_photo", label:"Owner Photo", sided:false, required:true, domain:"dead", freeform:true,
     hint:"Photograph the owner with the animal — tap capture when ready" },
-  { id:"video", label:"Video", sided:false, required:true, domain:"dead", video:true,
-    hint:"Tap to record a 60 second video of the animal" },
+  
   { id:"scar_injury", label:"Scar/Injury", sided:false, required:false, domain:"dead", freeform:true,
     hint:"Optional — capture any visible scar or injury, tap capture when ready" },
   { id:"geotag", label:"Geotag", sided:false, required:true, domain:"dead", geotag:true, geotagSource:"flank",
@@ -625,6 +626,8 @@ const DEAD_STEPS = [
 
 // ---- LIVE CATTLE (underwriting documentation) ----
 const LIVE_STEPS = [
+  { id:"video_live", label:"Video", sided:false, required:true, domain:"live", video:true,
+    hint:"Tap to record a 60 second video of the animal" },
   { id:"flank_live", label:"Flank", sided:true, required:true, domain:"live",
     variants:{left:"left_side_live", right:"right_side_live"},
     hint:"Stand to the animal's visible side, keep the whole body in frame" },
@@ -639,8 +642,7 @@ const LIVE_STEPS = [
     hint:"Get close to the ear tag, keep the numbers readable" },
   { id:"owner_photo_live", label:"Owner Photo", sided:false, required:true, domain:"live", freeform:true,
     hint:"Photograph the owner with the animal — tap capture when ready" },
-  { id:"video_live", label:"Video", sided:false, required:true, domain:"live", video:true,
-    hint:"Tap to record a 60 second video of the animal" },
+  
   { id:"scar_injury_live", label:"Scar/Injury", sided:false, required:false, domain:"live", freeform:true,
     hint:"Optional — capture any visible scar or injury, tap capture when ready" },
   
