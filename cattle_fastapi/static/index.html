@@ -209,6 +209,53 @@
   .cam-error.show{display:flex;}
 
   .controls{flex:0 0 auto;display:flex;align-items:center;justify-content:center;gap:22px;padding:0;}
+  .zoom-control{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  width:100%;
+  max-width:320px;
+  margin:2px auto 0;
+  padding:0 8px;
+  box-sizing:border-box;
+}
+
+.zoom-control input[type="range"]{
+  flex:1;
+  min-width:120px;
+  accent-color:var(--accent);
+  cursor:pointer;
+}
+
+.zoom-control span{
+  font-size:11px;
+  color:var(--muted);
+  min-width:34px;
+  text-align:center;
+}
+
+.zoom-control .zoom-value{
+  min-width:42px;
+  font-weight:700;
+  color:#e7ebe0;
+}
+
+.zoom-btn{
+  font-size:24px;
+  font-weight:600;
+  line-height:1;
+}
+
+@media (max-width:420px){
+  .controls{
+    gap:14px;
+  }
+
+  .zoom-control{
+    max-width:280px;
+  }
+}
   .btn-round{width:42px;height:42px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:#dfe6d6;
     display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;transition:.15s ease;}
   .btn-round:active{transform:scale(.93);}
@@ -491,14 +538,53 @@
     </div>
 
     <div class="controls">
-      <button class="btn-round" id="switchBtn" title="Switch camera">⟳</button>
-      <button class="btn-round" id="pauseBtn" title="Pause/Resume recording" style="display:none;">⏸️</button>
 
-      <button class="shutter" id="shutterBtn" title="Capture"></button>
-      <button class="btn-round" id="galleryBtn" title="Upload from gallery">🖼️</button>
-      <button class="btn-round ref-btn" id="refBtn" title="See reference photo" style="display:none;">
-        <img id="refBtnThumb" alt="Reference">
-      </button>
+  <button class="btn-round" id="switchBtn" title="Switch camera">
+    ⟳
+  </button>
+<button class="btn-round ref-btn" id="refBtn" title="Reference photo">
+    <img id="refBtnThumb" alt="Reference">
+  </button>
+  <button class="btn-round zoom-btn" id="zoomOutBtn" title="Zoom out">
+    −
+  </button>
+
+  <button class="shutter" id="shutterBtn" title="Capture"></button>
+
+  <button class="btn-round zoom-btn" id="zoomInBtn" title="Zoom in">
+    +
+  </button>
+
+  <button class="btn-round" id="galleryBtn" title="Upload from gallery">
+    🖼️
+  </button>
+
+  <button class="btn-round" id="pauseBtn"
+          title="Pause/Resume recording"
+          style="display:none;">
+    ⏸️
+  </button>
+
+</div>
+
+<div class="zoom-control" id="zoomControl">
+
+  <span id="zoomOutLabel">1.0×</span>
+
+  <input
+    type="range"
+    id="zoomSlider"
+    min="1"
+    max="1"
+    step="0.1"
+    value="1"
+  >
+
+  <span id="zoomInLabel">1.0×</span>
+
+  <span class="zoom-value" id="zoomValue">1.0×</span>
+
+</div>
       <!-- No `accept` restriction here on purpose. Chrome's streamlined
            Android Photo Picker (the "Photos"-style grid) only activates
            when accept is restricted purely to image/video MIME types --
@@ -975,7 +1061,10 @@ const refLightboxCaption = document.getElementById('refLightboxCaption');
 const refLightboxClose   = document.getElementById('refLightboxClose');
 const pauseBtn = document.getElementById('pauseBtn');
 const refOverlay = document.getElementById('refOverlay');
-
+const zoomOutBtn = document.getElementById('zoomOutBtn');
+const zoomInBtn = document.getElementById('zoomInBtn');
+const zoomSlider = document.getElementById('zoomSlider');
+const zoomValue = document.getElementById('zoomValue');
 // ---------- Custom in-app alert (replaces native alert(), which shows the
 // site's URL as an uneditable browser-controlled title bar) ----------
 const appAlertBackdrop = document.getElementById('appAlertBackdrop');
@@ -2471,7 +2560,215 @@ function renderBackendIntegrityFields(cap){
   }
 }
 
+// =====================================================
+// CAMERA ZOOM
+// =====================================================
 
+let cameraTrack = null;
+
+let zoomMin = 1;
+let zoomMax = 1;
+let zoomStep = 0.1;
+let currentZoom = 1;
+
+
+function updateZoomUI(){
+
+  zoomSlider.min = zoomMin;
+  zoomSlider.max = zoomMax;
+  zoomSlider.step = zoomStep;
+  zoomSlider.value = currentZoom;
+
+  zoomValue.textContent =
+    `${currentZoom.toFixed(1)}×`;
+
+  document.getElementById('zoomOutLabel').textContent =
+    `${zoomMin.toFixed(1)}×`;
+
+  document.getElementById('zoomInLabel').textContent =
+    `${zoomMax.toFixed(1)}×`;
+
+  zoomOutBtn.disabled =
+    currentZoom <= zoomMin;
+
+  zoomInBtn.disabled =
+    currentZoom >= zoomMax;
+}
+
+
+async function setupCameraZoom(stream){
+
+  const tracks = stream.getVideoTracks();
+
+  if(!tracks.length){
+
+    cameraTrack = null;
+
+    zoomMin = 1;
+    zoomMax = 1;
+    currentZoom = 1;
+
+    updateZoomUI();
+
+    return;
+  }
+
+
+  cameraTrack = tracks[0];
+
+
+  const capabilities =
+    cameraTrack.getCapabilities
+      ? cameraTrack.getCapabilities()
+      : {};
+
+
+  if(
+    capabilities.zoom &&
+    Number.isFinite(capabilities.zoom.min) &&
+    Number.isFinite(capabilities.zoom.max)
+  ){
+
+    zoomMin = capabilities.zoom.min;
+
+    zoomMax = capabilities.zoom.max;
+
+    zoomStep =
+      capabilities.zoom.step || 0.1;
+
+
+    currentZoom =
+      Math.max(
+        zoomMin,
+        Math.min(zoomMax, 1)
+      );
+
+
+    try{
+
+      await cameraTrack.applyConstraints({
+        advanced: [
+          {
+            zoom: currentZoom
+          }
+        ]
+      });
+
+    }catch(err){
+
+      console.warn(
+        "Initial zoom could not be applied:",
+        err
+      );
+
+    }
+
+
+    zoomSlider.style.display = '';
+
+    updateZoomUI();
+
+  }else{
+
+    cameraTrack = null;
+
+    zoomMin = 1;
+    zoomMax = 1;
+    currentZoom = 1;
+
+    zoomSlider.style.display = 'none';
+
+    zoomOutBtn.style.display = 'none';
+
+    zoomInBtn.style.display = 'none';
+
+    updateZoomUI();
+
+    console.log(
+      "Native camera zoom is not supported."
+    );
+  }
+}
+
+
+async function setCameraZoom(value){
+
+  if(!cameraTrack){
+    return;
+  }
+
+
+  const zoom = Math.max(
+    zoomMin,
+    Math.min(
+      zoomMax,
+      Number(value)
+    )
+  );
+
+
+  try{
+
+    await cameraTrack.applyConstraints({
+
+      advanced: [
+        {
+          zoom: zoom
+        }
+      ]
+
+    });
+
+
+    currentZoom = zoom;
+
+    updateZoomUI();
+
+  }catch(err){
+
+    console.warn(
+      "Zoom change failed:",
+      err
+    );
+
+  }
+}
+
+
+zoomSlider.addEventListener(
+  'input',
+  () => {
+
+    setCameraZoom(
+      zoomSlider.value
+    );
+
+  }
+);
+
+
+zoomOutBtn.addEventListener(
+  'click',
+  () => {
+
+    setCameraZoom(
+      currentZoom - zoomStep
+    );
+
+  }
+);
+
+
+zoomInBtn.addEventListener(
+  'click',
+  () => {
+
+    setCameraZoom(
+      currentZoom + zoomStep
+    );
+
+  }
+);
 // ---------- Camera ----------
 async function startCamera(){
   stopCamera();
@@ -2487,6 +2784,9 @@ async function startCamera(){
     });
     currentStream = stream;
     video.srcObject = stream;
+    
+    await setupCameraZoom(stream);
+
     audioAvailable = stream.getAudioTracks().length > 0;
     camError.classList.remove('show');
   }catch(err){
@@ -2501,6 +2801,8 @@ async function startCamera(){
       });
       currentStream = videoOnlyStream;
       video.srcObject = videoOnlyStream;
+      await setupCameraZoom(videoOnlyStream);
+
       audioAvailable = false;
       camError.classList.remove('show');
     }catch(err2){
@@ -2510,7 +2812,41 @@ async function startCamera(){
   }
 }
 function stopCamera(){
-  if(currentStream){ currentStream.getTracks().forEach(t=>t.stop()); currentStream=null; }
+
+  if(currentStream){
+
+    currentStream
+      .getTracks()
+      .forEach(t => t.stop());
+
+    currentStream = null;
+  }
+
+
+  cameraTrack = null;
+
+
+  zoomMin = 1;
+  zoomMax = 1;
+  zoomStep = 0.1;
+  currentZoom = 1;
+
+
+  if(zoomSlider){
+
+    zoomSlider.min = 1;
+    zoomSlider.max = 1;
+    zoomSlider.value = 1;
+
+  }
+
+
+  if(zoomValue){
+
+    zoomValue.textContent = "1.0×";
+
+  }
+
 }
 
 switchBtn.addEventListener('click', () => {
