@@ -10,7 +10,7 @@
 // bump it means returning users keep silently using a stale cached copy.
 // =========================================================================
 
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v8';
 const CACHE_NAME = `cattle-claim-fastapi-${CACHE_VERSION}`;
 
 // ---- App shell: the local files this app is built from ----
@@ -37,7 +37,7 @@ const MODEL_ASSETS = [
   './models/left_right_live_int8.onnx',
   './models/fronthead_int8.onnx',
   'https://raw.githubusercontent.com/kshitij435/cattle/main/live_cattle_front_head.onnx',
-  
+  './models/n_960_fp16.onnx'
 ];
 
 // ---- All reference/example photos ----

@@ -749,10 +749,10 @@ function requiredSteps(){ return activeStepList().filter(s => s.required); }
 
 // ---- COCO general "cow present" pre-filter (works for both domains) ----
 const COCO_MODEL_CONFIG = {
-  url: "https://raw.githubusercontent.com/kshitij435/cattle/main/yolov8n.onnx",
-  inputSize: 640,
-  targetClassId: 19,
-  targetClassName: "cow",
+  url: "./models/n_960_fp16.onnx",
+  inputSize: 960,
+  targetClassId: 0,
+  targetClassName: "cattle",
   confThreshold: 0.4,
   iouThreshold: 0.45,
   minAreaFraction: 0.12
